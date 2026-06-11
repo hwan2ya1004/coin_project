@@ -1,0 +1,27 @@
+services:
+  # ── 챗봇 웹 서비스 ──────────────────────────
+  - type: web
+    name: coin-chatbot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    disk:
+      name: model-storage
+      mountPath: /data/models
+      sizeGB: 1
+
+  # ── 매일 자동 학습 Cron Job ─────────────────
+  - type: cron
+    name: coin-daily-train
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    schedule: "0 17 * * *"   # UTC 17:00 = KST 02:00 (매일 새벽 2시)
+    command: python train.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: MODEL_DIR
+        value: /data/models

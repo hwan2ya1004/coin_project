@@ -1,0 +1,11 @@
+streamlit==1.35.0
+lightgbm==4.3.0
+scikit-learn==1.4.2
+pandas==2.2.2
+numpy==1.26.4
+pyupbit==0.2.33
+ta==0.11.0
+plotly==5.22.0
+joblib==1.4.2
+requests==2.32.3
+schedule==1.2.2
