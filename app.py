@@ -113,8 +113,11 @@ def build_context(trades):
 === AI 예측 (오늘) ===
 {chr(10).join(preds) if preds else '모델 없음 (학습 필요)'}"""
 
-async def ask_claude(messages, trades):
+def ask_claude(messages, trades):
     import requests as req
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return "오류: ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다."
     ctx = build_context(trades)
     system = f"""당신은 코인 매매 일지를 분석하는 AI 트레이딩 어시스턴트입니다.
 사용자의 실제 매매 기록과 AI 예측 데이터를 바탕으로 구체적으로 분석해주세요.
@@ -125,8 +128,12 @@ async def ask_claude(messages, trades):
     history = [{"role": m["role"], "content": m["content"]}
                for m in messages if m["role"] != "system"]
     resp = req.post("https://api.anthropic.com/v1/messages",
-        headers={"Content-Type": "application/json"},
-        json={"model": "claude-sonnet-4-20250514", "max_tokens": 1000,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
               "system": system, "messages": history}, timeout=30)
     data = resp.json()
     return data["content"][0]["text"] if resp.ok else f"오류: {data.get('error',{}).get('message','')}"
@@ -198,8 +205,7 @@ cols = st.columns(len(quick))
 for i, q in enumerate(quick):
     if cols[i].button(q, key=f"q{i}"):
         st.session_state.messages.append({"role":"user","content":q})
-        import asyncio
-        reply = asyncio.run(ask_claude(st.session_state.messages, st.session_state.trades))
+        reply = ask_claude(st.session_state.messages, st.session_state.trades)
         st.session_state.messages.append({"role":"assistant","content":reply})
         st.rerun()
 
@@ -219,7 +225,6 @@ with st.form("chat_form", clear_on_submit=True):
     sent = c2.form_submit_button("전송")
     if sent and user_input.strip():
         st.session_state.messages.append({"role":"user","content":user_input.strip()})
-        import asyncio
-        reply = asyncio.run(ask_claude(st.session_state.messages, st.session_state.trades))
+        reply = ask_claude(st.session_state.messages, st.session_state.trades)
         st.session_state.messages.append({"role":"assistant","content":reply})
         st.rerun()

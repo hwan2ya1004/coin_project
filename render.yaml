@@ -8,6 +8,10 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: MODEL_DIR
+        value: /data/models
+      - key: ANTHROPIC_API_KEY
+        sync: false   # Render 대시보드 → Environment 탭에서 직접 입력
     disk:
       name: model-storage
       mountPath: /data/models
@@ -25,3 +29,7 @@ services:
         value: 3.11.0
       - key: MODEL_DIR
         value: /data/models
+    disk:
+      name: model-storage
+      mountPath: /data/models
+      sizeGB: 1
