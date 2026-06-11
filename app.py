@@ -33,10 +33,46 @@ html,[class*="css"]{font-family:'Noto Sans KR',sans-serif}
 </style>
 """, unsafe_allow_html=True)
 
-# ── 업비트 API 초기화 ──────────────────────────
-UPBIT_ACCESS = os.environ.get("UPBIT_ACCESS_KEY", "")
-UPBIT_SECRET = os.environ.get("UPBIT_SECRET_KEY", "")
+# ── 환경변수 ───────────────────────────────────
+UPBIT_ACCESS  = os.environ.get("UPBIT_ACCESS_KEY", "")
+UPBIT_SECRET  = os.environ.get("UPBIT_SECRET_KEY", "")
+NCP_URL       = os.environ.get("NCP_PROXY_URL", "")       # 예: http://1.2.3.4:8080
+NCP_SECRET    = os.environ.get("NCP_API_SECRET", "changeme")
 
+# ── NCP 프록시 헬퍼 ───────────────────────────
+def ncp_get(path, params=None):
+    """NCP 서버 GET 요청"""
+    if not NCP_URL:
+        return None
+    try:
+        import requests
+        r = requests.get(
+            f"{NCP_URL.rstrip('/')}{path}",
+            headers={"X-API-Secret": NCP_SECRET},
+            params=params,
+            timeout=10,
+        )
+        return r.json() if r.ok else None
+    except Exception:
+        return None
+
+def ncp_post(path, data=None):
+    """NCP 서버 POST 요청"""
+    if not NCP_URL:
+        return None
+    try:
+        import requests
+        r = requests.post(
+            f"{NCP_URL.rstrip('/')}{path}",
+            headers={"X-API-Secret": NCP_SECRET, "Content-Type": "application/json"},
+            json=data or {},
+            timeout=10,
+        )
+        return r.json() if r.ok else None
+    except Exception:
+        return None
+
+# ── 업비트 API 초기화 (직접 연결 — 로컬용) ────
 @st.cache_resource
 def get_upbit_client():
     if UPBIT_ACCESS and UPBIT_SECRET:
@@ -44,16 +80,16 @@ def get_upbit_client():
     return None
 
 # ── 업비트 실시간 시세 조회 ────────────────────
-@st.cache_data(ttl=30)  # 30초 캐시
+@st.cache_data(ttl=30)
 def get_current_prices():
     tickers = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-ADA"]
     try:
         prices = pyupbit.get_current_price(tickers)
         return prices if prices else {}
-    except Exception as e:
+    except Exception:
         return {}
 
-@st.cache_data(ttl=60)  # 1분 캐시
+@st.cache_data(ttl=60)
 def get_ticker_info():
     """24시간 변동률 포함 시세 정보"""
     tickers = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-ADA"]
@@ -72,26 +108,46 @@ def get_ticker_info():
         pass
     return {}
 
-# ── 업비트 잔고 조회 ───────────────────────────
+# ── 업비트 잔고 조회 (NCP 프록시 우선) ────────
 @st.cache_data(ttl=60)
 def get_balances():
+    # NCP 프록시가 설정된 경우 NCP를 통해 조회
+    if NCP_URL:
+        result = ncp_get("/balance")
+        if result is None:
+            return {"error": "NCP 서버 연결 실패"}
+        if "error" in result:
+            return {"error": result["error"]}
+        return result.get("balances", [])
+
+    # NCP 없으면 직접 연결 시도
     upbit = get_upbit_client()
     if not upbit:
         return []
     try:
         balances = upbit.get_balances()
-        # 에러 응답 처리 (dict로 반환되는 경우)
         if isinstance(balances, dict) and "error" in balances:
             return {"error": balances["error"].get("message", "알 수 없는 오류")}
         if not balances:
             return []
-        result = []
-        for b in balances:
-            if isinstance(b, dict) and float(b.get("balance", 0)) > 0:
-                result.append(b)
-        return result
+        return [b for b in balances if isinstance(b, dict) and float(b.get("balance", 0)) > 0]
     except Exception as e:
         return {"error": str(e)}
+
+# ── 자동매매 설정 조회 (NCP) ──────────────────
+@st.cache_data(ttl=30)
+def get_trade_config():
+    if not NCP_URL:
+        return None
+    return ncp_get("/trade/config")
+
+# ── 매매 로그 조회 (NCP) ──────────────────────
+@st.cache_data(ttl=30)
+def get_trade_log():
+    if not NCP_URL:
+        return []
+    result = ncp_get("/trade/log", params={"limit": 20})
+    return result.get("logs", []) if result else []
 
 # ── 매매 기록 저장/로드 (JSON) ─────────────────
 TRADE_FILE = os.path.join(os.environ.get("MODEL_DIR", "models"), "trades.json")
@@ -136,7 +192,6 @@ def fmt(n):
     return f"₩{n:.4f}"
 
 def fmt_price(n):
-    """가격 포맷 (소수점 처리)"""
     if n is None: return "—"
     if n >= 1_000_000: return f"₩{n/1_000_000:.2f}M"
     if n >= 1_000:     return f"₩{n:,.0f}"
@@ -176,7 +231,6 @@ def build_context(trades):
         if p:
             preds.append(f"{coin}: 상승확률 {p['prob']*100:.1f}% RSI:{p['rsi']:.1f} MACD:{p['macd_diff']:+.0f}")
 
-    # 실시간 시세 추가
     ticker_info = get_ticker_info()
     price_lines = []
     for ticker, info in ticker_info.items():
@@ -211,10 +265,7 @@ def ask_groq(messages, trades):
     history = [{"role": m["role"], "content": m["content"]}
                for m in messages if m["role"] != "system"]
     resp = req.post("https://api.groq.com/openai/v1/chat/completions",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         json={"model": "llama-3.3-70b-versatile", "max_tokens": 1000,
               "messages": [{"role": "system", "content": system}] + history}, timeout=30)
     data = resp.json()
@@ -250,12 +301,12 @@ with st.sidebar:
         coin_names = {"KRW-BTC": "BTC", "KRW-ETH": "ETH", "KRW-XRP": "XRP",
                       "KRW-SOL": "SOL", "KRW-ADA": "ADA"}
         for ticker, info in ticker_info.items():
-            price = info.get("trade_price", 0)
-            chg   = info.get("signed_change_rate", 0) * 100
+            price     = info.get("trade_price", 0)
+            chg       = info.get("signed_change_rate", 0) * 100
             chg_price = info.get("signed_change_price", 0)
-            color = "#3fb950" if chg >= 0 else "#f85149"
-            arrow = "▲" if chg >= 0 else "▼"
-            name  = coin_names.get(ticker, ticker.replace("KRW-",""))
+            color     = "#3fb950" if chg >= 0 else "#f85149"
+            arrow     = "▲" if chg >= 0 else "▼"
+            name      = coin_names.get(ticker, ticker.replace("KRW-",""))
             st.markdown(
                 f"<div class='price-card'>"
                 f"<div style='display:flex;justify-content:space-between;align-items:center'>"
@@ -264,9 +315,7 @@ with st.sidebar:
                 f"</div>"
                 f"<div style='font-family:monospace;font-size:14px;font-weight:700;margin-top:2px'>{fmt_price(price)}</div>"
                 f"<div style='font-size:11px;color:{color}'>{arrow} {fmt_price(abs(chg_price))}</div>"
-                f"</div>",
-                unsafe_allow_html=True
-            )
+                f"</div>", unsafe_allow_html=True)
         if st.button("🔄 시세 새로고침", key="refresh_price"):
             st.cache_data.clear()
             st.rerun()
@@ -277,9 +326,8 @@ with st.sidebar:
 
     # ── 업비트 잔고 ─────────────────────────────
     st.markdown("## 💰 업비트 잔고")
-    if UPBIT_ACCESS and UPBIT_SECRET:
+    if NCP_URL or (UPBIT_ACCESS and UPBIT_SECRET):
         balances = get_balances()
-        # 에러 메시지 표시
         if isinstance(balances, dict) and "error" in balances:
             st.markdown(f"<div style='color:#f85149;font-size:12px'>⚠️ 조회 실패:<br>{balances['error']}</div>", unsafe_allow_html=True)
         elif balances:
@@ -289,7 +337,6 @@ with st.sidebar:
                 balance  = float(b.get("balance", 0))
                 avg_buy  = float(b.get("avg_buy_price", 0))
                 ticker   = f"KRW-{currency}" if currency != "KRW" else "KRW"
-
                 if currency == "KRW":
                     st.markdown(
                         f"<div class='price-card'>"
@@ -300,7 +347,7 @@ with st.sidebar:
                     cur_price = prices.get(ticker, 0) if prices else 0
                     if cur_price and avg_buy:
                         pnl_pct = (cur_price - avg_buy) / avg_buy * 100
-                        color = "#3fb950" if pnl_pct >= 0 else "#f85149"
+                        color   = "#3fb950" if pnl_pct >= 0 else "#f85149"
                         pnl_str = f"<span style='color:{color};font-size:11px'>{pnl_pct:+.2f}%</span>"
                     else:
                         pnl_str = ""
@@ -308,15 +355,14 @@ with st.sidebar:
                         f"<div class='price-card'>"
                         f"<div style='display:flex;justify-content:space-between'>"
                         f"<span style='font-weight:700;font-size:13px'>{currency}</span>"
-                        f"{pnl_str}"
-                        f"</div>"
+                        f"{pnl_str}</div>"
                         f"<div style='font-size:12px;color:#8b949e'>수량: {balance:.4f}</div>"
                         f"<div style='font-size:12px;color:#8b949e'>평균매수: {fmt_price(avg_buy)}</div>"
                         f"</div>", unsafe_allow_html=True)
         else:
             st.markdown("<div style='color:#8b949e;font-size:12px'>잔고 없음</div>", unsafe_allow_html=True)
     else:
-        st.markdown("<div style='color:#8b949e;font-size:12px'>업비트 API 키 미설정<br>(UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY)</div>", unsafe_allow_html=True)
+        st.markdown("<div style='color:#8b949e;font-size:12px'>업비트 API 키 또는 NCP 서버 미설정</div>", unsafe_allow_html=True)
 
     st.divider()
     st.markdown("## ➕ 매매 기록 추가")
@@ -357,35 +403,176 @@ with st.sidebar:
             st.markdown(f"<div style='color:#8b949e;font-size:12px;padding:4px 0'>"
                         f"{coin.replace('KRW-','')} — 모델 없음</div>", unsafe_allow_html=True)
 
-# ── 메인: 챗봇 ─────────────────────────────────
-st.markdown("### 💬 AI 분석 챗봇")
+# ── 메인 탭 ────────────────────────────────────
+tab_chat, tab_auto = st.tabs(["💬 AI 분석 챗봇", "⚙️ 자동매매"])
 
-# 빠른 질문
-quick = ["이번 달 수익률?", "왜 손해봤어?", "매매 패턴 분석해줘", "어떤 코인이 제일 수익?", "오늘 뭐 사야 해?"]
-cols = st.columns(len(quick))
-for i, q in enumerate(quick):
-    if cols[i].button(q, key=f"q{i}"):
-        st.session_state.messages.append({"role":"user","content":q})
-        reply = ask_groq(st.session_state.messages, st.session_state.trades)
-        st.session_state.messages.append({"role":"assistant","content":reply})
-        st.rerun()
+# ════════════════════════════════════════════════
+# 탭 1: AI 챗봇
+# ════════════════════════════════════════════════
+with tab_chat:
+    quick = ["이번 달 수익률?", "왜 손해봤어?", "매매 패턴 분석해줘", "어떤 코인이 제일 수익?", "오늘 뭐 사야 해?"]
+    cols = st.columns(len(quick))
+    for i, q in enumerate(quick):
+        if cols[i].button(q, key=f"q{i}"):
+            st.session_state.messages.append({"role":"user","content":q})
+            reply = ask_groq(st.session_state.messages, st.session_state.trades)
+            st.session_state.messages.append({"role":"assistant","content":reply})
+            st.rerun()
 
-st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-# 메시지 렌더링
-for m in st.session_state.messages:
-    if m["role"] == "user":
-        st.markdown(f"<div style='text-align:right;margin:6px 0'><span class='chat-user'>{m['content']}</span></div>", unsafe_allow_html=True)
+    for m in st.session_state.messages:
+        if m["role"] == "user":
+            st.markdown(f"<div style='text-align:right;margin:6px 0'><span class='chat-user'>{m['content']}</span></div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div style='margin:6px 0'><span class='chat-bot'>{m['content']}</span></div>", unsafe_allow_html=True)
+
+    with st.form("chat_form", clear_on_submit=True):
+        c1, c2 = st.columns([5,1])
+        user_input = c1.text_input("메시지 입력", placeholder="매매 기록에 대해 뭐든 물어보세요...", label_visibility="collapsed")
+        sent = c2.form_submit_button("전송")
+        if sent and user_input.strip():
+            st.session_state.messages.append({"role":"user","content":user_input.strip()})
+            reply = ask_groq(st.session_state.messages, st.session_state.trades)
+            st.session_state.messages.append({"role":"assistant","content":reply})
+            st.rerun()
+
+# ════════════════════════════════════════════════
+# 탭 2: 자동매매
+# ════════════════════════════════════════════════
+with tab_auto:
+    if not NCP_URL:
+        st.warning("⚠️ NCP 서버가 설정되지 않았습니다.\n\n환경변수 `NCP_PROXY_URL`에 NCP 서버 주소를 입력하세요.\n예: `http://1.2.3.4:8080`")
     else:
-        st.markdown(f"<div style='margin:6px 0'><span class='chat-bot'>{m['content']}</span></div>", unsafe_allow_html=True)
+        col_cfg, col_log = st.columns([1, 1])
 
-# 입력창
-with st.form("chat_form", clear_on_submit=True):
-    c1, c2 = st.columns([5,1])
-    user_input = c1.text_input("메시지 입력", placeholder="매매 기록에 대해 뭐든 물어보세요...", label_visibility="collapsed")
-    sent = c2.form_submit_button("전송")
-    if sent and user_input.strip():
-        st.session_state.messages.append({"role":"user","content":user_input.strip()})
-        reply = ask_groq(st.session_state.messages, st.session_state.trades)
-        st.session_state.messages.append({"role":"assistant","content":reply})
-        st.rerun()
+        # ── 자동매매 설정 ──────────────────────
+        with col_cfg:
+            st.markdown("### ⚙️ 자동매매 설정")
+
+            cfg = get_trade_config() or {}
+            enabled       = cfg.get("enabled", False)
+            top_n         = cfg.get("top_n_coins", 20)
+            buy_thr       = cfg.get("buy_threshold", 60.0)
+            sell_thr      = cfg.get("sell_threshold", 40.0)
+            buy_discount  = cfg.get("buy_discount", 2.0)
+            buy_ratio     = cfg.get("buy_ratio", 10.0)
+
+            # ON/OFF 토글
+            new_enabled = st.toggle("자동매매 활성화", value=enabled)
+            if new_enabled:
+                st.markdown("<div style='color:#3fb950;font-size:12px;margin-bottom:8px'>🟢 자동매매 활성화 중 — 매일 새벽 2시 실행</div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='color:#8b949e;font-size:12px;margin-bottom:8px'>⚫ 자동매매 비활성화</div>", unsafe_allow_html=True)
+
+            with st.form("auto_trade_form"):
+                new_top_n = st.slider(
+                    "대상 코인 수 (거래량 상위)",
+                    min_value=5, max_value=50, value=int(top_n), step=5,
+                    help="업비트 KRW 마켓 거래량 상위 N개 코인을 자동 선택합니다"
+                )
+                new_buy_thr = st.slider(
+                    "매수 기준 상승확률 (%)",
+                    min_value=50.0, max_value=90.0, value=float(buy_thr), step=1.0,
+                    help="AI 예측 상승확률이 이 값 이상이면 매수 주문"
+                )
+                new_sell_thr = st.slider(
+                    "매도 기준 상승확률 (%)",
+                    min_value=10.0, max_value=50.0, value=float(sell_thr), step=1.0,
+                    help="AI 예측 상승확률이 이 값 이하이면 시장가 매도"
+                )
+                new_discount = st.slider(
+                    "매수 할인율 (현재가 대비 %)",
+                    min_value=0.5, max_value=10.0, value=float(buy_discount), step=0.5,
+                    help="현재가보다 이 비율만큼 낮은 가격으로 지정가 매수 주문"
+                )
+                new_ratio = st.slider(
+                    "1회 매수 비율 (KRW 잔고의 %)",
+                    min_value=1.0, max_value=50.0, value=float(buy_ratio), step=1.0,
+                    help="보유 KRW 잔고의 이 비율만큼 1회 매수에 사용"
+                )
+
+                # 설정 요약
+                st.markdown(
+                    f"<div style='background:#0d2137;border:1px solid #1f6feb;border-radius:8px;"
+                    f"padding:10px 12px;font-size:12px;margin-top:8px'>"
+                    f"<b style='color:#58a6ff'>설정 요약</b><br>"
+                    f"상위 {new_top_n}개 코인 | 매수 ≥{new_buy_thr:.0f}% | 매도 ≤{new_sell_thr:.0f}%<br>"
+                    f"지정가 -{new_discount:.1f}% | 잔고의 {new_ratio:.0f}% 사용"
+                    f"</div>", unsafe_allow_html=True
+                )
+
+                if st.form_submit_button("💾 설정 저장"):
+                    result = ncp_post("/trade/config", {
+                        "enabled":        new_enabled,
+                        "top_n_coins":    new_top_n,
+                        "buy_threshold":  new_buy_thr,
+                        "sell_threshold": new_sell_thr,
+                        "buy_discount":   new_discount,
+                        "buy_ratio":      new_ratio,
+                    })
+                    if result and result.get("ok"):
+                        st.success("✅ 설정 저장 완료!")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("❌ 저장 실패 — NCP 서버 연결을 확인하세요")
+
+            # 수동 실행 버튼
+            st.markdown("---")
+            c1, c2 = st.columns(2)
+            if c1.button("🚀 지금 매매 실행", key="run_trade"):
+                result = ncp_post("/trade/run")
+                if result and result.get("ok"):
+                    st.success("자동매매 시작됨!")
+                    st.cache_data.clear()
+                else:
+                    st.error("실행 실패")
+            if c2.button("🧠 지금 학습 실행", key="run_train"):
+                result = ncp_post("/train")
+                if result and result.get("ok"):
+                    st.success("학습 시작됨! (백그라운드)")
+                else:
+                    st.error("실행 실패")
+
+        # ── 매매 로그 ──────────────────────────
+        with col_log:
+            st.markdown("### 📋 자동매매 로그")
+
+            logs = get_trade_log()
+            if logs:
+                for log_entry in logs:
+                    action  = log_entry.get("action", "")
+                    ticker  = log_entry.get("ticker", "")
+                    price   = log_entry.get("price", 0)
+                    prob    = log_entry.get("prob", 0)
+                    status  = log_entry.get("status", "")
+                    time_str = log_entry.get("time", "")[:16]
+                    trade_type = log_entry.get("type", "")
+                    krw     = log_entry.get("krw", 0)
+
+                    action_color = "#3fb950" if action == "매수" else "#f85149"
+                    status_icon  = "✅" if status in ("체결", "주문완료") else "❌"
+
+                    krw_str = f" | ₩{krw:,}" if krw else ""
+                    st.markdown(
+                        f"<div class='price-card' style='margin-bottom:6px'>"
+                        f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+                        f"<span style='color:{action_color};font-weight:700;font-size:13px'>{action}</span>"
+                        f"<span style='font-weight:700;font-size:13px'>{ticker.replace('KRW-','')}</span>"
+                        f"<span style='font-size:11px;color:#8b949e'>{time_str}</span>"
+                        f"</div>"
+                        f"<div style='font-size:12px;color:#8b949e;margin-top:3px'>"
+                        f"{trade_type} | {fmt_price(price)}{krw_str}"
+                        f"</div>"
+                        f"<div style='font-size:11px;margin-top:2px'>"
+                        f"<span style='color:#58a6ff'>확률 {prob}%</span>"
+                        f"<span style='margin-left:8px'>{status_icon} {status}</span>"
+                        f"</div>"
+                        f"</div>", unsafe_allow_html=True)
+
+                if st.button("🔄 로그 새로고침", key="refresh_log"):
+                    st.cache_data.clear()
+                    st.rerun()
+            else:
+                st.markdown("<div style='color:#8b949e;font-size:13px;padding:20px 0'>아직 자동매매 기록이 없습니다.<br>설정 후 활성화하면 매일 새벽 2시에 실행됩니다.</div>", unsafe_allow_html=True)
