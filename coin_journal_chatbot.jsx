@@ -11,11 +11,19 @@ const SAMPLE_TRADES = [
 ];
 
 const COINS = ["BTC","ETH","XRP","SOL","ADA","DOGE","AVAX","DOT","MATIC","LINK"];
+const UPBIT_TICKERS = ["KRW-BTC","KRW-ETH","KRW-XRP","KRW-SOL","KRW-ADA"];
 
 function fmt(n) {
   if (n >= 1_000_000) return `₩${(n/1_000_000).toFixed(2)}M`;
   if (n >= 1_000)     return `₩${n.toLocaleString()}`;
   return `₩${n.toLocaleString()}`;
+}
+function fmtPrice(n) {
+  if (!n && n !== 0) return "—";
+  if (n >= 1_000_000) return `₩${(n/1_000_000).toFixed(2)}M`;
+  if (n >= 1_000)     return `₩${n.toLocaleString()}`;
+  if (n >= 1)         return `₩${n.toFixed(2)}`;
+  return `₩${n.toFixed(4)}`;
 }
 function fmtPct(v) {
   const sign = v >= 0 ? "+" : "";
@@ -52,12 +60,36 @@ function calcStats(trades) {
   return { pairs, holding, totalProfit, winRate, avgPct, tradeCount: pairs.length };
 }
 
-// ── 챗봇 API 호출 ──────────────────────────────
-async function askAI(messages, trades) {
+// ── 업비트 공개 API 시세 조회 ──────────────────
+async function fetchUpbitTickers() {
+  try {
+    const markets = UPBIT_TICKERS.join(",");
+    const res = await fetch(`https://api.upbit.com/v1/ticker?markets=${markets}`, {
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) throw new Error("업비트 API 오류");
+    const data = await res.json();
+    const result = {};
+    data.forEach(item => { result[item.market] = item; });
+    return result;
+  } catch (e) {
+    console.error("업비트 시세 조회 실패:", e);
+    return {};
+  }
+}
+
+// ── 챗봇 API 호출 (백엔드 프록시 또는 직접 호출) ──
+async function askAI(messages, trades, tickerInfo) {
   const stats = calcStats(trades);
   const tradesSummary = trades.map(t =>
     `[${t.date}] ${t.type === "buy" ? "매수" : "매도"} ${t.coin} | 가격: ${fmt(t.price)} | 수량: ${t.amount} | 이유: ${t.reason}`
   ).join("\n");
+
+  // 실시간 시세 요약
+  const priceSummary = Object.entries(tickerInfo).map(([market, info]) => {
+    const chg = (info.signed_change_rate * 100).toFixed(2);
+    return `${market}: ${fmtPrice(info.trade_price)} (${chg >= 0 ? "+" : ""}${chg}%)`;
+  }).join("\n");
 
   const systemPrompt = `당신은 코인 매매 일지를 분석해주는 전문 트레이딩 어시스턴트입니다.
 사용자의 실제 매매 기록을 바탕으로 구체적이고 실용적인 분석을 제공하세요.
@@ -72,15 +104,30 @@ ${tradesSummary}
 - 평균 수익률: ${fmtPct(stats.avgPct)}
 - 보유 중: ${stats.holding.map(h => h.coin).join(", ") || "없음"}
 
+=== 실시간 시세 (업비트) ===
+${priceSummary || "시세 정보 없음"}
+
 위 데이터를 바탕으로 질문에 답하세요. 
 - 구체적인 날짜, 코인명, 수익/손실 금액을 언급하세요
 - 매매 패턴의 장단점을 솔직하게 분석하세요
 - 개선 방향도 제안하세요
 - 한국어로 답변하세요`;
 
+  // 백엔드 프록시 엔드포인트 시도 (Streamlit 서버가 있는 경우)
+  // 없으면 직접 호출 (API 키는 환경변수에서 주입 필요)
+  const apiKey = window.__ANTHROPIC_API_KEY__ || "";
+
+  if (!apiKey) {
+    return "⚠️ API 키가 설정되지 않았습니다.\n\nStreamlit 앱(app.py)을 통해 챗봇을 사용하거나,\n환경변수 ANTHROPIC_API_KEY를 설정해주세요.";
+  }
+
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
       max_tokens: 1000,
@@ -91,7 +138,48 @@ ${tradesSummary}
     }),
   });
   const data = await res.json();
+  if (!res.ok) {
+    const errMsg = data?.error?.message || "알 수 없는 오류";
+    throw new Error(errMsg);
+  }
   return data.content?.[0]?.text || "응답을 받지 못했어요.";
+}
+
+// ── 실시간 시세 위젯 컴포넌트 ──────────────────
+function PriceTicker({ tickerInfo, loading }) {
+  const coinNames = { "KRW-BTC": "BTC", "KRW-ETH": "ETH", "KRW-XRP": "XRP", "KRW-SOL": "SOL", "KRW-ADA": "ADA" };
+
+  if (loading) {
+    return (
+      <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "8px 20px" }}>
+        {UPBIT_TICKERS.map(t => (
+          <div key={t} style={{ background: "#21262d", borderRadius: 8, padding: "6px 12px", minWidth: 80, flexShrink: 0 }}>
+            <div style={{ fontSize: 11, color: "#8b949e" }}>{coinNames[t]}</div>
+            <div style={{ fontSize: 13, color: "#30363d", fontFamily: "monospace" }}>로딩중...</div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "8px 20px", borderBottom: "1px solid #21262d" }}>
+      {UPBIT_TICKERS.map(ticker => {
+        const info = tickerInfo[ticker];
+        if (!info) return null;
+        const chg = info.signed_change_rate * 100;
+        const color = chg >= 0 ? "#3fb950" : "#f85149";
+        const arrow = chg >= 0 ? "▲" : "▼";
+        return (
+          <div key={ticker} style={{ background: "#161b22", border: "1px solid #30363d", borderRadius: 8, padding: "6px 12px", minWidth: 90, flexShrink: 0 }}>
+            <div style={{ fontSize: 11, color: "#8b949e", marginBottom: 2 }}>{coinNames[ticker]}</div>
+            <div style={{ fontSize: 12, fontFamily: "monospace", fontWeight: 700, color: "#e6edf3" }}>{fmtPrice(info.trade_price)}</div>
+            <div style={{ fontSize: 11, color, marginTop: 1 }}>{arrow} {Math.abs(chg).toFixed(2)}%</div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 // ── 컴포넌트 ──────────────────────────────────
@@ -108,7 +196,24 @@ export default function App() {
   const [editId, setEditId]   = useState(null);
   const chatEndRef = useRef(null);
 
+  // 업비트 실시간 시세 상태
+  const [tickerInfo, setTickerInfo] = useState({});
+  const [priceLoading, setPriceLoading] = useState(true);
+
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  // 업비트 시세 주기적 갱신 (30초)
+  useEffect(() => {
+    const loadPrices = async () => {
+      setPriceLoading(true);
+      const data = await fetchUpbitTickers();
+      setTickerInfo(data);
+      setPriceLoading(false);
+    };
+    loadPrices();
+    const interval = setInterval(loadPrices, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const stats = calcStats(trades);
 
@@ -121,10 +226,10 @@ export default function App() {
     setInput("");
     setLoading(true);
     try {
-      const reply = await askAI(newMsgs, trades);
+      const reply = await askAI(newMsgs, trades, tickerInfo);
       setMessages(prev => [...prev, { role: "assistant", content: reply }]);
     } catch(e) {
-      setMessages(prev => [...prev, { role: "assistant", content: "오류가 발생했어요. 다시 시도해주세요." }]);
+      setMessages(prev => [...prev, { role: "assistant", content: `오류: ${e.message}\n\n다시 시도해주세요.` }]);
     }
     setLoading(false);
   }
@@ -170,7 +275,7 @@ export default function App() {
         <span style={{ fontSize: 22 }}>📒</span>
         <div>
           <div style={{ fontWeight: 700, fontSize: 16, letterSpacing: "-0.02em" }}>코인 매매 일지</div>
-          <div style={{ fontSize: 11, color: "#8b949e" }}>AI 분석 챗봇</div>
+          <div style={{ fontSize: 11, color: "#8b949e" }}>AI 분석 챗봇 · 업비트 연동</div>
         </div>
 
         {/* 요약 뱃지 */}
@@ -187,6 +292,9 @@ export default function App() {
           ))}
         </div>
       </div>
+
+      {/* 업비트 실시간 시세 바 */}
+      <PriceTicker tickerInfo={tickerInfo} loading={priceLoading} />
 
       {/* 탭 */}
       <div style={{ background: "#161b22", borderBottom: "1px solid #21262d", display: "flex", padding: "0 20px" }}>
@@ -305,21 +413,35 @@ export default function App() {
             {stats.holding.length > 0 && (
               <>
                 <div style={{ margin: "16px 0 8px", fontSize: 12, color: "#8b949e", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>보유 중</div>
-                {stats.holding.map((h, i) => (
-                  <div key={i} style={{ background: "#161b22", border: "1px solid #30363d", borderRadius: 10, padding: "12px 16px", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div>
-                      <span style={{ fontWeight: 700, fontSize: 15 }}>{h.coin}</span>
-                      <span style={{ marginLeft: 8, fontSize: 12, color: "#8b949e" }}>{h.date} 매수</span>
-                      <div style={{ fontSize: 12, color: "#8b949e", marginTop: 4 }}>
-                        {fmt(h.price)} × {h.amount} | <span style={{ color: "#c9d1d9" }}>{h.reason}</span>
+                {stats.holding.map((h, i) => {
+                  const ticker = `KRW-${h.coin}`;
+                  const curPrice = tickerInfo[ticker]?.trade_price;
+                  const pnlPct = curPrice && h.price ? (curPrice - h.price) / h.price * 100 : null;
+                  return (
+                    <div key={i} style={{ background: "#161b22", border: "1px solid #30363d", borderRadius: 10, padding: "12px 16px", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                          <span style={{ fontWeight: 700, fontSize: 15 }}>{h.coin}</span>
+                          <span style={{ fontSize: 12, color: "#8b949e" }}>{h.date} 매수</span>
+                          {pnlPct !== null && (
+                            <span style={{ fontSize: 12, color: pnlPct >= 0 ? "#3fb950" : "#f85149", fontWeight: 700 }}>
+                              {pnlPct >= 0 ? "▲" : "▼"} {Math.abs(pnlPct).toFixed(2)}%
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 12, color: "#8b949e" }}>
+                          매수가: {fmt(h.price)} × {h.amount}
+                          {curPrice && <span style={{ marginLeft: 8, color: "#58a6ff" }}>현재: {fmtPrice(curPrice)}</span>}
+                        </div>
+                        <div style={{ fontSize: 12, color: "#8b949e", marginTop: 2 }}>{h.reason}</div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button onClick={() => startEdit(h)} style={{ background: "#21262d", border: "1px solid #30363d", borderRadius: 6, padding: "4px 10px", color: "#8b949e", fontSize: 12, cursor: "pointer" }}>수정</button>
+                        <button onClick={() => deleteTrade(h.id)} style={{ background: "#3d1212", border: "1px solid #b91c1c", borderRadius: 6, padding: "4px 10px", color: "#f85149", fontSize: 12, cursor: "pointer" }}>삭제</button>
                       </div>
                     </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button onClick={() => startEdit(h)} style={{ background: "#21262d", border: "1px solid #30363d", borderRadius: 6, padding: "4px 10px", color: "#8b949e", fontSize: 12, cursor: "pointer" }}>수정</button>
-                      <button onClick={() => deleteTrade(h.id)} style={{ background: "#3d1212", border: "1px solid #b91c1c", borderRadius: 6, padding: "4px 10px", color: "#f85149", fontSize: 12, cursor: "pointer" }}>삭제</button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </>
             )}
 
@@ -388,6 +510,19 @@ export default function App() {
                 </div>
               ))}
             </div>
+
+            {/* 현재 시세 참고 */}
+            {form.coin && tickerInfo[`KRW-${form.coin}`] && (
+              <div style={{ background: "#0d2137", border: "1px solid #1f6feb", borderRadius: 8, padding: "8px 12px", marginBottom: 14, fontSize: 12 }}>
+                <span style={{ color: "#58a6ff" }}>📊 {form.coin} 현재가: </span>
+                <span style={{ fontFamily: "monospace", fontWeight: 700, color: "#e6edf3" }}>
+                  {fmtPrice(tickerInfo[`KRW-${form.coin}`].trade_price)}
+                </span>
+                <span style={{ color: tickerInfo[`KRW-${form.coin}`].signed_change_rate >= 0 ? "#3fb950" : "#f85149", marginLeft: 8 }}>
+                  {(tickerInfo[`KRW-${form.coin}`].signed_change_rate * 100).toFixed(2)}%
+                </span>
+              </div>
+            )}
 
             <div style={{ marginBottom: 20 }}>
               <label style={{ fontSize: 12, color: "#8b949e", display: "block", marginBottom: 4 }}>

@@ -12,6 +12,10 @@ services:
         value: /data/models
       - key: ANTHROPIC_API_KEY
         sync: false   # Render 대시보드 → Environment 탭에서 직접 입력
+      - key: UPBIT_ACCESS_KEY
+        sync: false   # 업비트 Access Key (Render 대시보드에서 입력)
+      - key: UPBIT_SECRET_KEY
+        sync: false   # 업비트 Secret Key (Render 대시보드에서 입력)
     disk:
       name: model-storage
       mountPath: /data/models

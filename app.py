@@ -10,6 +10,7 @@ import os, json
 from datetime import datetime
 from coin_predictor_lgbm import fetch_ohlcv, make_features, COINS, MODEL_DIR
 import joblib, ta
+import pyupbit
 
 st.set_page_config(page_title="코인 매매 AI", page_icon="📒", layout="wide")
 
@@ -26,8 +27,60 @@ html,[class*="css"]{font-family:'Noto Sans KR',sans-serif}
 .badge-up{background:#0d4429;color:#3fb950;border:1px solid #238636;border-radius:20px;padding:2px 10px;font-size:13px;font-weight:700}
 .badge-down{background:#3d1212;color:#f85149;border:1px solid #b91c1c;border-radius:20px;padding:2px 10px;font-size:13px;font-weight:700}
 .stButton>button{background:#238636;color:#fff;border:none;border-radius:8px;font-weight:600;width:100%}
+.price-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px 12px;margin-bottom:6px}
 </style>
 """, unsafe_allow_html=True)
+
+# ── 업비트 API 초기화 ──────────────────────────
+UPBIT_ACCESS = os.environ.get("UPBIT_ACCESS_KEY", "")
+UPBIT_SECRET = os.environ.get("UPBIT_SECRET_KEY", "")
+
+@st.cache_resource
+def get_upbit_client():
+    if UPBIT_ACCESS and UPBIT_SECRET:
+        return pyupbit.Upbit(UPBIT_ACCESS, UPBIT_SECRET)
+    return None
+
+# ── 업비트 실시간 시세 조회 ────────────────────
+@st.cache_data(ttl=30)  # 30초 캐시
+def get_current_prices():
+    tickers = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-ADA"]
+    try:
+        prices = pyupbit.get_current_price(tickers)
+        return prices if prices else {}
+    except Exception as e:
+        return {}
+
+@st.cache_data(ttl=60)  # 1분 캐시
+def get_ticker_info():
+    """24시간 변동률 포함 시세 정보"""
+    tickers = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-ADA"]
+    try:
+        import requests
+        markets = ",".join(tickers)
+        resp = requests.get(
+            f"https://api.upbit.com/v1/ticker?markets={markets}",
+            headers={"Accept": "application/json"},
+            timeout=5
+        )
+        if resp.ok:
+            data = resp.json()
+            return {item["market"]: item for item in data}
+    except Exception:
+        pass
+    return {}
+
+# ── 업비트 잔고 조회 ───────────────────────────
+@st.cache_data(ttl=60)
+def get_balances():
+    upbit = get_upbit_client()
+    if not upbit:
+        return []
+    try:
+        balances = upbit.get_balances()
+        return [b for b in balances if float(b.get("balance", 0)) > 0] if balances else []
+    except Exception:
+        return []
 
 # ── 매매 기록 저장/로드 (JSON) ─────────────────
 TRADE_FILE = os.path.join(os.environ.get("MODEL_DIR", "models"), "trades.json")
@@ -71,6 +124,14 @@ def fmt(n):
     if n >= 1_000:     return f"₩{n:,.0f}"
     return f"₩{n:.4f}"
 
+def fmt_price(n):
+    """가격 포맷 (소수점 처리)"""
+    if n is None: return "—"
+    if n >= 1_000_000: return f"₩{n/1_000_000:.2f}M"
+    if n >= 1_000:     return f"₩{n:,.0f}"
+    if n >= 1:         return f"₩{n:,.2f}"
+    return f"₩{n:.4f}"
+
 # ── AI 예측 ────────────────────────────────────
 @st.cache_data(ttl=3600)
 def get_prediction(ticker):
@@ -103,12 +164,23 @@ def build_context(trades):
         p = get_prediction(coin)
         if p:
             preds.append(f"{coin}: 상승확률 {p['prob']*100:.1f}% RSI:{p['rsi']:.1f} MACD:{p['macd_diff']:+.0f}")
+
+    # 실시간 시세 추가
+    ticker_info = get_ticker_info()
+    price_lines = []
+    for ticker, info in ticker_info.items():
+        chg = info.get("signed_change_rate", 0) * 100
+        price_lines.append(f"{ticker}: {fmt_price(info.get('trade_price'))} ({chg:+.2f}%)")
+
     return f"""=== 매매 기록 ===
 {chr(10).join(lines) if lines else '기록 없음'}
 
 === 통계 ===
 완료거래:{stats['count']}건 | 총수익:{fmt(stats['total'])} | 승률:{stats['winRate']:.1f}% | 평균수익률:{stats['avgPct']:+.2f}%
 보유중:{', '.join(h['coin'] for h in stats['holding']) or '없음'}
+
+=== 실시간 시세 ===
+{chr(10).join(price_lines) if price_lines else '시세 조회 실패'}
 
 === AI 예측 (오늘) ===
 {chr(10).join(preds) if preds else '모델 없음 (학습 필요)'}"""
@@ -156,6 +228,80 @@ with st.sidebar:
                     f"<span style='color:#8b949e;font-size:11px'>{label}</span>"
                     f"<span style='float:right;color:{color};font-weight:700;font-family:monospace'>{val}</span>"
                     f"</div>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── 업비트 실시간 시세 ──────────────────────
+    st.markdown("## 📊 실시간 시세")
+    ticker_info = get_ticker_info()
+    if ticker_info:
+        coin_names = {"KRW-BTC": "BTC", "KRW-ETH": "ETH", "KRW-XRP": "XRP",
+                      "KRW-SOL": "SOL", "KRW-ADA": "ADA"}
+        for ticker, info in ticker_info.items():
+            price = info.get("trade_price", 0)
+            chg   = info.get("signed_change_rate", 0) * 100
+            chg_price = info.get("signed_change_price", 0)
+            color = "#3fb950" if chg >= 0 else "#f85149"
+            arrow = "▲" if chg >= 0 else "▼"
+            name  = coin_names.get(ticker, ticker.replace("KRW-",""))
+            st.markdown(
+                f"<div class='price-card'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+                f"<span style='font-weight:700;font-size:13px'>{name}</span>"
+                f"<span style='color:{color};font-size:12px;font-weight:700'>{arrow} {abs(chg):.2f}%</span>"
+                f"</div>"
+                f"<div style='font-family:monospace;font-size:14px;font-weight:700;margin-top:2px'>{fmt_price(price)}</div>"
+                f"<div style='font-size:11px;color:{color}'>{arrow} {fmt_price(abs(chg_price))}</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+        if st.button("🔄 시세 새로고침", key="refresh_price"):
+            st.cache_data.clear()
+            st.rerun()
+    else:
+        st.markdown("<div style='color:#8b949e;font-size:12px'>시세 조회 중...</div>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── 업비트 잔고 ─────────────────────────────
+    st.markdown("## 💰 업비트 잔고")
+    if UPBIT_ACCESS and UPBIT_SECRET:
+        balances = get_balances()
+        if balances:
+            prices = get_current_prices()
+            for b in balances:
+                currency = b.get("currency", "")
+                balance  = float(b.get("balance", 0))
+                avg_buy  = float(b.get("avg_buy_price", 0))
+                ticker   = f"KRW-{currency}" if currency != "KRW" else "KRW"
+
+                if currency == "KRW":
+                    st.markdown(
+                        f"<div class='price-card'>"
+                        f"<span style='font-weight:700'>KRW</span>"
+                        f"<span style='float:right;font-family:monospace'>{fmt(balance)}</span>"
+                        f"</div>", unsafe_allow_html=True)
+                else:
+                    cur_price = prices.get(ticker, 0) if prices else 0
+                    if cur_price and avg_buy:
+                        pnl_pct = (cur_price - avg_buy) / avg_buy * 100
+                        color = "#3fb950" if pnl_pct >= 0 else "#f85149"
+                        pnl_str = f"<span style='color:{color};font-size:11px'>{pnl_pct:+.2f}%</span>"
+                    else:
+                        pnl_str = ""
+                    st.markdown(
+                        f"<div class='price-card'>"
+                        f"<div style='display:flex;justify-content:space-between'>"
+                        f"<span style='font-weight:700;font-size:13px'>{currency}</span>"
+                        f"{pnl_str}"
+                        f"</div>"
+                        f"<div style='font-size:12px;color:#8b949e'>수량: {balance:.4f}</div>"
+                        f"<div style='font-size:12px;color:#8b949e'>평균매수: {fmt_price(avg_buy)}</div>"
+                        f"</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div style='color:#8b949e;font-size:12px'>잔고 없음 또는 조회 실패</div>", unsafe_allow_html=True)
+    else:
+        st.markdown("<div style='color:#8b949e;font-size:12px'>업비트 API 키 미설정<br>(UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY)</div>", unsafe_allow_html=True)
 
     st.divider()
     st.markdown("## ➕ 매매 기록 추가")
