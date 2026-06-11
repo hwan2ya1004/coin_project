@@ -257,25 +257,31 @@ def run_auto_trade():
                 bal    = holdings[ticker]["balance"]
                 result = upbit.sell_market_order(ticker, bal)
                 entry  = {
-                    "time":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "ticker": ticker,
-                    "action": "매도",
-                    "type":   "시장가",
-                    "price":  cur_price,
-                    "amount": bal,
-                    "prob":   prob,
-                    "status": "체결" if result and "uuid" in result else "실패",
-                    "uuid":   result.get("uuid", "") if result else "",
+                    "time":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ticker":   ticker,
+                    "action":   "매도",
+                    "type":     "시장가",
+                    "price":    cur_price,
+                    "amount":   bal,
+                    "prob":     prob,
+                    "status":   "체결" if result and "uuid" in result else "실패",
+                    "uuid":     result.get("uuid", "") if result else "",
+                    "notified": False,
                 }
                 append_trade_log(entry)
                 log.info(f"[매도] {ticker} | 확률:{prob}% | 수량:{bal} | 상태:{entry['status']}")
 
             # ── 매수 판단 ──────────────────────
             elif ticker not in holdings and prob >= buy_thr:
-                # 잔고의 buy_ratio% 사용 (최소 5,000원)
-                buy_amount = krw_balance * (buy_ratio / 100) * 0.9995  # 수수료 고려
+                # ★ 매수 직전 실제 KRW 잔고 재조회 (지정가 주문 동결 반영)
+                try:
+                    real_krw = float(upbit.get_balance("KRW") or 0)
+                except Exception:
+                    real_krw = krw_balance  # 조회 실패 시 로컬 값 사용
+
+                buy_amount = real_krw * (buy_ratio / 100) * 0.9995  # 수수료 고려
                 if buy_amount < 5000:
-                    log.info(f"[매수 스킵] {ticker} — 매수금액 부족: {buy_amount:,.0f}원 (잔고:{krw_balance:,.0f}원의 {buy_ratio}%)")
+                    log.info(f"[매수 스킵] {ticker} — 매수금액 부족: {buy_amount:,.0f}원 (실제잔고:{real_krw:,.0f}원의 {buy_ratio}%)")
                     continue
 
                 buy_price = adjust_price_unit(cur_price * (1 - discount / 100))
@@ -283,20 +289,21 @@ def run_auto_trade():
 
                 result = upbit.buy_limit_order(ticker, buy_price, volume)
                 entry  = {
-                    "time":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "ticker": ticker,
-                    "action": "매수",
-                    "type":   f"지정가(-{discount}%)",
-                    "price":  buy_price,
-                    "amount": round(volume, 8),
-                    "krw":    round(buy_amount),
-                    "prob":   prob,
-                    "status": "주문완료" if result and "uuid" in result else "실패",
-                    "uuid":   result.get("uuid", "") if result else "",
+                    "time":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ticker":   ticker,
+                    "action":   "매수",
+                    "type":     f"지정가(-{discount}%)",
+                    "price":    buy_price,
+                    "amount":   round(volume, 8),
+                    "krw":      round(buy_amount),
+                    "prob":     prob,
+                    "status":   "주문완료" if result and "uuid" in result else "실패",
+                    "uuid":     result.get("uuid", "") if result else "",
+                    "notified": False,
                 }
                 append_trade_log(entry)
-                krw_balance -= buy_amount  # 사용한 금액 차감
-                log.info(f"[매수] {ticker} | 확률:{prob}% | 주문가:{buy_price:,} | 금액:{buy_amount:,.0f}원 | 상태:{entry['status']}")
+                krw_balance = real_krw - buy_amount  # 로컬 잔고도 갱신
+                log.info(f"[매수] {ticker} | 확률:{prob}% | 주문가:{buy_price:,} | 금액:{buy_amount:,.0f}원 (실제잔고:{real_krw:,.0f}원의 {buy_ratio}%) | 상태:{entry['status']}")
 
         except Exception as e:
             log.error(f"{ticker} 매매 오류: {e}")
@@ -471,6 +478,29 @@ def trade_run():
     t = threading.Thread(target=run_auto_trade, daemon=True)
     t.start()
     return jsonify({"ok": True, "message": "자동매매 시작됨 (백그라운드)"})
+
+
+@app.route("/trade/notify", methods=["POST"])
+def trade_notify():
+    """Render 대시보드에서 알림 확인 시 notified=True 처리"""
+    auth = check_auth()
+    if auth:
+        return auth
+
+    try:
+        logs = load_trade_log()
+        updated = 0
+        for entry in logs:
+            if not entry.get("notified", True):
+                entry["notified"] = True
+                updated += 1
+        if updated:
+            with open(TRADE_LOG, "w", encoding="utf-8") as f:
+                json.dump(logs, f, ensure_ascii=False, indent=2)
+        log.info(f"알림 확인 처리: {updated}건")
+        return jsonify({"ok": True, "updated": updated})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ════════════════════════════════════════════════

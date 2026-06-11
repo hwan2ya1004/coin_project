@@ -149,6 +149,17 @@ def get_trade_log():
     result = ncp_get("/trade/log", params={"limit": 20})
     return result.get("logs", []) if result else []
 
+# ── 미확인 매매 알림 조회 ──────────────────────
+def get_unnotified_trades():
+    """notified=False 인 최신 매매 내역 반환"""
+    logs = get_trade_log()
+    return [l for l in logs if not l.get("notified", True)]
+
+# ── 매매 알림 확인 처리 (NCP에 PATCH) ─────────
+def mark_trades_notified():
+    """NCP 서버에 알림 확인 처리 요청"""
+    ncp_post("/trade/notify")
+
 # ── 매매 기록 저장/로드 (JSON) ─────────────────
 TRADE_FILE = os.path.join(os.environ.get("MODEL_DIR", "models"), "trades.json")
 
@@ -273,10 +284,64 @@ def ask_groq(messages, trades):
         return data["choices"][0]["message"]["content"]
     return f"오류: {data.get('error', {}).get('message', '알 수 없는 오류')}"
 
+# ── 자동매매 알림 메시지 생성 ──────────────────
+def build_trade_alert_message(new_trades):
+    """새 매매 내역을 챗봇 알림 메시지로 변환"""
+    lines = []
+    for t in new_trades:
+        action  = t.get("action", "")
+        ticker  = t.get("ticker", "").replace("KRW-", "")
+        price   = t.get("price", 0)
+        prob    = t.get("prob", 0)
+        krw     = t.get("krw", 0)
+        amount  = t.get("amount", 0)
+        status  = t.get("status", "")
+        time_str = t.get("time", "")[:16]
+        trade_type = t.get("type", "")
+
+        icon = "🟢" if action == "매수" else "🔴"
+        if action == "매수":
+            lines.append(
+                f"{icon} **{action}** {ticker}  \n"
+                f"  - 시각: {time_str}  \n"
+                f"  - 주문가: {fmt_price(price)} ({trade_type})  \n"
+                f"  - 금액: ₩{krw:,}  \n"
+                f"  - AI 상승확률: {prob}%  \n"
+                f"  - 상태: {status}"
+            )
+        else:
+            lines.append(
+                f"{icon} **{action}** {ticker}  \n"
+                f"  - 시각: {time_str}  \n"
+                f"  - 체결가: {fmt_price(price)}  \n"
+                f"  - 수량: {amount}  \n"
+                f"  - AI 상승확률: {prob}%  \n"
+                f"  - 상태: {status}"
+            )
+
+    summary = "\n\n".join(lines)
+    return f"🔔 **자동매매 알림** — 새로운 매매가 실행되었습니다!\n\n{summary}\n\n이 매매에 대해 분석이 필요하면 말씀해주세요."
+
 # ── 세션 초기화 ────────────────────────────────
-if "trades"   not in st.session_state: st.session_state.trades   = load_trades()
-if "messages" not in st.session_state: st.session_state.messages = [
+if "trades"        not in st.session_state: st.session_state.trades        = load_trades()
+if "messages"      not in st.session_state: st.session_state.messages      = [
     {"role":"assistant","content":"안녕하세요! 매매 일지 AI예요 😊\n\n매매 기록을 추가하거나, 아래 질문을 눌러보세요!"}]
+if "last_log_time" not in st.session_state: st.session_state.last_log_time = ""
+
+# ── 새 매매 알림 체크 (NCP 연동) ──────────────
+if NCP_URL:
+    new_trades = get_unnotified_trades()
+    if new_trades:
+        # 가장 최신 매매 시각 확인 (중복 알림 방지)
+        latest_time = new_trades[0].get("time", "")
+        if latest_time != st.session_state.last_log_time:
+            st.session_state.last_log_time = latest_time
+            # 챗봇에 자동 알림 메시지 추가
+            alert_msg = build_trade_alert_message(new_trades)
+            st.session_state.messages.append({"role": "assistant", "content": alert_msg})
+            # NCP 서버에 알림 확인 처리
+            mark_trades_notified()
+            st.cache_data.clear()
 
 # ── 사이드바 ────────────────────────────────────
 with st.sidebar:
@@ -402,6 +467,29 @@ with st.sidebar:
         else:
             st.markdown(f"<div style='color:#8b949e;font-size:12px;padding:4px 0'>"
                         f"{coin.replace('KRW-','')} — 모델 없음</div>", unsafe_allow_html=True)
+
+# ── 미확인 매매 알림 배너 (메인 화면 상단) ────
+if NCP_URL and new_trades:
+    count = len(new_trades)
+    actions = [t.get("action","") for t in new_trades]
+    buy_count  = actions.count("매수")
+    sell_count = actions.count("매도")
+    parts = []
+    if buy_count:  parts.append(f"매수 {buy_count}건")
+    if sell_count: parts.append(f"매도 {sell_count}건")
+    summary_str = " · ".join(parts)
+    tickers_str = ", ".join(set(t.get("ticker","").replace("KRW-","") for t in new_trades))
+    st.markdown(
+        f"<div style='background:#0d2137;border:1px solid #1f6feb;border-radius:10px;"
+        f"padding:12px 16px;margin-bottom:12px;display:flex;align-items:center;gap:12px'>"
+        f"<span style='font-size:20px'>🔔</span>"
+        f"<div>"
+        f"<div style='color:#58a6ff;font-weight:700;font-size:14px'>자동매매 실행됨 — {summary_str}</div>"
+        f"<div style='color:#8b949e;font-size:12px;margin-top:2px'>코인: {tickers_str} | 💬 AI 분석 챗봇 탭에서 상세 내용을 확인하세요</div>"
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
 
 # ── 메인 탭 ────────────────────────────────────
 tab_chat, tab_auto = st.tabs(["💬 AI 분석 챗봇", "⚙️ 자동매매"])
