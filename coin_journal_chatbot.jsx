@@ -365,6 +365,7 @@ export default function App() {
               <input value={input} onChange={e => setInput(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendMessage()}
                 placeholder="매매 기록에 대해 뭐든 물어보세요..."
+                autoComplete="off"
                 style={{ flex: 1, background: "#21262d", border: "1px solid #30363d", borderRadius: 10,
                   padding: "10px 14px", color: "#e6edf3", fontSize: 14, outline: "none" }}/>
               <button onClick={sendMessage} disabled={loading}
@@ -478,6 +479,7 @@ export default function App() {
               <div key={f.key} style={{ marginBottom: 14 }}>
                 <label style={{ fontSize: 12, color: "#8b949e", display: "block", marginBottom: 4 }}>{f.label}</label>
                 <input type={f.type} value={form[f.key]} onChange={e => setForm(p => ({...p, [f.key]: e.target.value}))}
+                  autoComplete="off"
                   style={{ width: "100%", background: "#21262d", border: "1px solid #30363d", borderRadius: 8, padding: "9px 12px", color: "#e6edf3", fontSize: 14, boxSizing: "border-box" }}/>
               </div>
             ))}
@@ -506,6 +508,7 @@ export default function App() {
                   <label style={{ fontSize: 12, color: "#8b949e", display: "block", marginBottom: 4 }}>{f.label}</label>
                   <input type="number" value={form[f.key]} onChange={e => setForm(p => ({...p, [f.key]: e.target.value}))}
                     placeholder={f.ph}
+                    autoComplete="off"
                     style={{ width: "100%", background: "#21262d", border: "1px solid #30363d", borderRadius: 8, padding: "9px 12px", color: "#e6edf3", fontSize: 14, boxSizing: "border-box" }}/>
                 </div>
               ))}
