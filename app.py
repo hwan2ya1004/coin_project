@@ -3,6 +3,8 @@ app.py — 코인 매매 일지 AI 챗봇
 실행: streamlit run app.py
 """
 import warnings; warnings.filterwarnings("ignore")
+from dotenv import load_dotenv
+load_dotenv()  # .env 파일에서 환경변수 로드 (로컬 개발용)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -185,11 +187,11 @@ def build_context(trades):
 === AI 예측 (오늘) ===
 {chr(10).join(preds) if preds else '모델 없음 (학습 필요)'}"""
 
-def ask_claude(messages, trades):
+def ask_groq(messages, trades):
     import requests as req
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
-        return "오류: ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다."
+        return "오류: GROQ_API_KEY 환경변수가 설정되지 않았습니다.\n\nhttps://console.groq.com 에서 무료 API 키를 발급받으세요."
     ctx = build_context(trades)
     system = f"""당신은 코인 매매 일지를 분석하는 AI 트레이딩 어시스턴트입니다.
 사용자의 실제 매매 기록과 AI 예측 데이터를 바탕으로 구체적으로 분석해주세요.
@@ -199,16 +201,17 @@ def ask_claude(messages, trades):
 {ctx}"""
     history = [{"role": m["role"], "content": m["content"]}
                for m in messages if m["role"] != "system"]
-    resp = req.post("https://api.anthropic.com/v1/messages",
+    resp = req.post("https://api.groq.com/openai/v1/chat/completions",
         headers={
             "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
+            "Authorization": f"Bearer {api_key}",
         },
-        json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
-              "system": system, "messages": history}, timeout=30)
+        json={"model": "llama-3.3-70b-versatile", "max_tokens": 1000,
+              "messages": [{"role": "system", "content": system}] + history}, timeout=30)
     data = resp.json()
-    return data["content"][0]["text"] if resp.ok else f"오류: {data.get('error',{}).get('message','')}"
+    if resp.ok:
+        return data["choices"][0]["message"]["content"]
+    return f"오류: {data.get('error', {}).get('message', '알 수 없는 오류')}"
 
 # ── 세션 초기화 ────────────────────────────────
 if "trades"   not in st.session_state: st.session_state.trades   = load_trades()
@@ -351,7 +354,7 @@ cols = st.columns(len(quick))
 for i, q in enumerate(quick):
     if cols[i].button(q, key=f"q{i}"):
         st.session_state.messages.append({"role":"user","content":q})
-        reply = ask_claude(st.session_state.messages, st.session_state.trades)
+        reply = ask_groq(st.session_state.messages, st.session_state.trades)
         st.session_state.messages.append({"role":"assistant","content":reply})
         st.rerun()
 
@@ -367,10 +370,10 @@ for m in st.session_state.messages:
 # 입력창
 with st.form("chat_form", clear_on_submit=True):
     c1, c2 = st.columns([5,1])
-    user_input = c1.text_input("", placeholder="매매 기록에 대해 뭐든 물어보세요...", label_visibility="collapsed")
+    user_input = c1.text_input("메시지 입력", placeholder="매매 기록에 대해 뭐든 물어보세요...", label_visibility="collapsed")
     sent = c2.form_submit_button("전송")
     if sent and user_input.strip():
         st.session_state.messages.append({"role":"user","content":user_input.strip()})
-        reply = ask_claude(st.session_state.messages, st.session_state.trades)
+        reply = ask_groq(st.session_state.messages, st.session_state.trades)
         st.session_state.messages.append({"role":"assistant","content":reply})
         st.rerun()

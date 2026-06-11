@@ -78,7 +78,7 @@ async function fetchUpbitTickers() {
   }
 }
 
-// ── 챗봇 API 호출 (백엔드 프록시 또는 직접 호출) ──
+// ── 챗봇 API 호출 (Groq) ──
 async function askAI(messages, trades, tickerInfo) {
   const stats = calcStats(trades);
   const tradesSummary = trades.map(t =>
@@ -113,28 +113,27 @@ ${priceSummary || "시세 정보 없음"}
 - 개선 방향도 제안하세요
 - 한국어로 답변하세요`;
 
-  // 백엔드 프록시 엔드포인트 시도 (Streamlit 서버가 있는 경우)
-  // 없으면 직접 호출 (API 키는 환경변수에서 주입 필요)
-  const apiKey = window.__ANTHROPIC_API_KEY__ || "";
+  const apiKey = window.__GROQ_API_KEY__ || "";
 
   if (!apiKey) {
-    return "⚠️ API 키가 설정되지 않았습니다.\n\nStreamlit 앱(app.py)을 통해 챗봇을 사용하거나,\n환경변수 ANTHROPIC_API_KEY를 설정해주세요.";
+    return "⚠️ GROQ_API_KEY가 설정되지 않았습니다.\n\nhttps://console.groq.com 에서 무료 API 키를 발급받으세요.\n\nStreamlit 앱(app.py)을 통해 챗봇을 사용하는 것을 권장합니다.";
   }
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
+      "Authorization": `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: "llama-3.3-70b-versatile",
       max_tokens: 1000,
-      system: systemPrompt,
-      messages: messages.filter(m => m.role !== "system").map(m => ({
-        role: m.role, content: m.content
-      })),
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...messages.filter(m => m.role !== "system").map(m => ({
+          role: m.role, content: m.content
+        })),
+      ],
     }),
   });
   const data = await res.json();
@@ -142,7 +141,7 @@ ${priceSummary || "시세 정보 없음"}
     const errMsg = data?.error?.message || "알 수 없는 오류";
     throw new Error(errMsg);
   }
-  return data.content?.[0]?.text || "응답을 받지 못했어요.";
+  return data.choices?.[0]?.message?.content || "응답을 받지 못했어요.";
 }
 
 // ── 실시간 시세 위젯 컴포넌트 ──────────────────
