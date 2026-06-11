@@ -80,9 +80,18 @@ def get_balances():
         return []
     try:
         balances = upbit.get_balances()
-        return [b for b in balances if float(b.get("balance", 0)) > 0] if balances else []
-    except Exception:
-        return []
+        # 에러 응답 처리 (dict로 반환되는 경우)
+        if isinstance(balances, dict) and "error" in balances:
+            return {"error": balances["error"].get("message", "알 수 없는 오류")}
+        if not balances:
+            return []
+        result = []
+        for b in balances:
+            if isinstance(b, dict) and float(b.get("balance", 0)) > 0:
+                result.append(b)
+        return result
+    except Exception as e:
+        return {"error": str(e)}
 
 # ── 매매 기록 저장/로드 (JSON) ─────────────────
 TRADE_FILE = os.path.join(os.environ.get("MODEL_DIR", "models"), "trades.json")
@@ -270,7 +279,10 @@ with st.sidebar:
     st.markdown("## 💰 업비트 잔고")
     if UPBIT_ACCESS and UPBIT_SECRET:
         balances = get_balances()
-        if balances:
+        # 에러 메시지 표시
+        if isinstance(balances, dict) and "error" in balances:
+            st.markdown(f"<div style='color:#f85149;font-size:12px'>⚠️ 조회 실패:<br>{balances['error']}</div>", unsafe_allow_html=True)
+        elif balances:
             prices = get_current_prices()
             for b in balances:
                 currency = b.get("currency", "")
@@ -302,7 +314,7 @@ with st.sidebar:
                         f"<div style='font-size:12px;color:#8b949e'>평균매수: {fmt_price(avg_buy)}</div>"
                         f"</div>", unsafe_allow_html=True)
         else:
-            st.markdown("<div style='color:#8b949e;font-size:12px'>잔고 없음 또는 조회 실패</div>", unsafe_allow_html=True)
+            st.markdown("<div style='color:#8b949e;font-size:12px'>잔고 없음</div>", unsafe_allow_html=True)
     else:
         st.markdown("<div style='color:#8b949e;font-size:12px'>업비트 API 키 미설정<br>(UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY)</div>", unsafe_allow_html=True)
 
